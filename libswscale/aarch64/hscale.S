@@ -345,15 +345,28 @@ function ff_hscale8to19_4_neon, export=1
         ldr             w14, [x3, w14, uxtw]
         ldr             w15, [x3, w15, uxtw]
 
-        sub             sp, sp, #32
-
-        stp             w8, w9, [sp]
-        stp             w10, w11, [sp, #8]
-        stp             w12, w13, [sp, #16]
-        stp             w14, w15, [sp, #24]
+        // E-style: register tbl-transpose (drop-in for store-to-stack + ld4),
+        // removing the memory round-trip from the gather path. Bit-exact.
+        adrp            x6, .Lhsc_e_idx0
+        add             x6, x6, :lo12:.Lhsc_e_idx0
+        ldr             q24, [x6, #0]
+        ldr             q25, [x6, #16]
+        ldr             q26, [x6, #32]
+        ldr             q27, [x6, #48]
+        ins             v16.s[0], w8
+        ins             v16.s[1], w9
+        ins             v16.s[2], w10
+        ins             v16.s[3], w11
+        ins             v17.s[0], w12
+        ins             v17.s[1], w13
+        ins             v17.s[2], w14
+        ins             v17.s[3], w15
 
 1:
-        ld4             {v0.8b, v1.8b, v2.8b, v3.8b}, [sp]
+        tbl             v0.8b, {v16.16b, v17.16b}, v24.8b
+        tbl             v1.8b, {v16.16b, v17.16b}, v25.8b
+        tbl             v2.8b, {v16.16b, v17.16b}, v26.8b
+        tbl             v3.8b, {v16.16b, v17.16b}, v27.8b
         ld4             {v28.8h, v29.8h, v30.8h, v31.8h}, [x4], #64 // filter[0..7]
         // load filterPositions into registers for next iteration
 
@@ -367,28 +380,32 @@ function ff_hscale8to19_4_neon, export=1
         smull           v5.4s, v0.4h, v28.4h        // multiply first column of src
         ldr             w9, [x3, w9, uxtw]
         smull2          v6.4s, v0.8h, v28.8h
-        stp             w8, w9, [sp]
+        ins             v16.s[0], w8
+        ins             v16.s[1], w9
 
         uxtl            v1.8h, v1.8b
         ldr             w10, [x3, w10, uxtw]
         smlal           v5.4s, v1.4h, v29.4h        // multiply second column of src
         ldr             w11, [x3, w11, uxtw]
         smlal2          v6.4s, v1.8h, v29.8h
-        stp             w10, w11, [sp, #8]
+        ins             v16.s[2], w10
+        ins             v16.s[3], w11
 
         uxtl            v2.8h, v2.8b
         ldr             w12, [x3, w12, uxtw]
         smlal           v5.4s, v2.4h, v30.4h        // multiply third column of src
         ldr             w13, [x3, w13, uxtw]
         smlal2          v6.4s, v2.8h, v30.8h
-        stp             w12, w13, [sp, #16]
+        ins             v17.s[0], w12
+        ins             v17.s[1], w13
 
         uxtl            v3.8h, v3.8b
         ldr             w14, [x3, w14, uxtw]
         smlal           v5.4s, v3.4h, v31.4h        // multiply fourth column of src
         ldr             w15, [x3, w15, uxtw]
         smlal2          v6.4s, v3.8h, v31.8h
-        stp             w14, w15, [sp, #24]
+        ins             v17.s[2], w14
+        ins             v17.s[3], w15
 
         sub             w2, w2, #8
         sshr            v5.4s, v5.4s, #3
@@ -401,7 +418,10 @@ function ff_hscale8to19_4_neon, export=1
         b.ge            1b
 
         // here we make last iteration, without updating the registers
-        ld4             {v0.8b, v1.8b, v2.8b, v3.8b}, [sp]
+        tbl             v0.8b, {v16.16b, v17.16b}, v24.8b
+        tbl             v1.8b, {v16.16b, v17.16b}, v25.8b
+        tbl             v2.8b, {v16.16b, v17.16b}, v26.8b
+        tbl             v3.8b, {v16.16b, v17.16b}, v27.8b
         ld4             {v28.8h, v29.8h, v30.8h, v31.8h}, [x4], #64 // filter[0..7]
 
         uxtl            v0.8h, v0.8b
@@ -425,7 +445,6 @@ function ff_hscale8to19_4_neon, export=1
 
         sub             w2, w2, #8
         st1             {v5.4s, v6.4s}, [x1], #32
-        add             sp, sp, #32 // restore stack
         cbnz            w2, 2f
 
         ret
@@ -966,6 +985,11 @@ function ff_hscale16to15_X4_neon_asm, export=1
 
         ret
 endfunc
+
+        // NOTE: an E-style register tbl-transpose was tried for
+        // ff_hscale16to19_4_neon_asm but measured 1.17x SLOWER than the stock
+        // store-to-stack + ld4 (4-register 64-byte tbl latency beats the win),
+        // so it was reverted. The 8-bit 8to19_4 keeps the tbl version (~1.38x).
 
 function ff_hscale16to19_4_neon_asm, export=1
         // w0               int shift
