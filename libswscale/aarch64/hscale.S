@@ -1368,3 +1368,54 @@ function ff_hscale16to19_X4_neon_asm, export=1
 
         ret
 endfunc
+
+/* A: fs==8 fast path for ff_hscale8to15_X8_neon. The 4 filter rows for one
+ * output group are contiguous when filterSize==8 (4*8*2 = 64 bytes), loaded
+ * in one quad ld1 instead of 4 separate ld1. Bit-exact vs stock _X8.
+ * Valid only for filterSize==8 and dstW % 4 == 0 (dispatched via wrapper). */
+.text
+.align 4
+.global ff_hs8_15_X8_fs8
+.type   ff_hs8_15_X8_fs8, %function
+ff_hs8_15_X8_fs8:
+1:
+        ldp             w8, w0, [x5]        // filterPos[0],[1]
+        ldp             w11, w9, [x5, #8]   // filterPos[2],[3]
+        add             x5, x5, #16
+        add             x17, x3, w8, uxtw
+        add             x8,  x3, w0, uxtw
+        add             x0,  x3, w11, uxtw
+        add             x11, x3, w9, uxtw
+        movi            v0.16b, #0
+        movi            v1.16b, #0
+        movi            v2.16b, #0
+        movi            v3.16b, #0
+        // all 4 filter rows in one quad load (fs==8 -> contiguous 64B): out0..out3 -> v20..v23
+        // NOTE: use caller-saved v20-v23 (v8-v15 are callee-saved per AAPCS64 and must be preserved)
+        ld1             {v20.8h, v21.8h, v22.8h, v23.8h}, [x4], #64
+        ld1             {v4.8b}, [x17], #8
+        ld1             {v6.8b}, [x8],  #8
+        ld1             {v16.8b}, [x0], #8
+        ld1             {v18.8b}, [x11], #8
+        uxtl            v4.8h, v4.8b
+        uxtl            v6.8h, v6.8b
+        uxtl            v16.8h, v16.8b
+        uxtl            v18.8h, v18.8b
+        smlal           v0.4s, v4.4h,  v20.4h
+        smlal2          v0.4s, v4.8h,  v20.8h
+        smlal           v1.4s, v6.4h,  v21.4h
+        smlal2          v1.4s, v6.8h,  v21.8h
+        smlal           v2.4s, v16.4h, v22.4h
+        smlal2          v2.4s, v16.8h, v22.8h
+        smlal           v3.4s, v18.4h, v23.4h
+        smlal2          v3.4s, v18.8h, v23.8h
+        addp            v0.4s, v0.4s, v1.4s
+        addp            v2.4s, v2.4s, v3.4s
+        addp            v0.4s, v0.4s, v2.4s
+        sqshrn          v0.4h, v0.4s, #7
+        st1             {v0.4h}, [x1], #8
+        sub             w2, w2, #4
+        cbnz            w2, 1b
+        ret
+.size ff_hs8_15_X8_fs8, .-ff_hs8_15_X8_fs8
+
