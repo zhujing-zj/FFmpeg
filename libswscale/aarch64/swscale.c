@@ -239,6 +239,24 @@ static void ff_yuv2nv12cX_neon(enum AVPixelFormat dstFormat, const uint8_t *chrD
     }
 }
 
+/* A: fs==8 fast path for the 8-to-15 hscale _X8 kernel.  When filterSize==8
+ * the 4 filter rows for one output group are contiguous (4*8*2 = 64 bytes),
+ * so the fs8 kernel loads them in a single quad ld1 instead of 4 separate
+ * ld1.  The fs8 kernel terminates its loop with cbnz, so it is only valid
+ * when dstW is a multiple of 4; otherwise fall back to the stock _X8. */
+void ff_hs8_15_X8_fs8(SwsInternal *c, int16_t *dst, int dstW,
+                      const uint8_t *src, const int16_t *filter,
+                      const int32_t *filterPos, int filterSize);
+static void ff_hscale8to15_X8_neon_fs8(SwsInternal *c, int16_t *dst, int dstW,
+                       const uint8_t *src, const int16_t *filter,
+                       const int32_t *filterPos, int filterSize)
+{
+    if ((dstW & 3) == 0)
+        ff_hs8_15_X8_fs8(c, dst, dstW, src, filter, filterPos, filterSize);
+    else
+        ff_hscale8to15_X8_neon(c, dst, dstW, src, filter, filterPos, filterSize);
+}
+
 #define ASSIGN_SCALE_FUNC2(hscalefn, filtersize, opt) do {              \
     if (c->srcBpc == 8) {                                               \
         if(c->dstBpc <= 14) {                                           \
@@ -260,6 +278,8 @@ static void ff_yuv2nv12cX_neon(enum AVPixelFormat dstFormat, const uint8_t *chrD
 #define ASSIGN_SCALE_FUNC(hscalefn, filtersize, opt) do {               \
     if (filtersize == 4)                                                \
         ASSIGN_SCALE_FUNC2(hscalefn, 4, opt);                           \
+    else if (filtersize == 8 && c->srcBpc == 8 && c->dstBpc <= 14)      \
+        hscalefn = ff_hscale8to15_X8_neon_fs8;                          \
     else if (filtersize % 8 == 0)                                       \
         ASSIGN_SCALE_FUNC2(hscalefn, X8, opt);                          \
     else if (filtersize % 4 == 0 && filtersize % 8 != 0)                \
@@ -432,5 +452,8 @@ av_cold void ff_sws_init_swscale_aarch64(SwsInternal *c)
         default:
             break;
         }
+
+
     }
 }
+
