@@ -32,17 +32,17 @@ jobs:
 
       - name: Build + bench v2 (fe23ed0219)
         run: |
-          git checkout ci/v2-ref
+          git checkout ci/v3-ref
           make -j4 checkasm
-          ./tests/checkasm/checkasm --test=sw_scale --bench | tee bench_v2.txt
+          ./tests/checkasm/checkasm --test=sw_scale --bench | tee bench_v3.txt
 
       - name: Collect outputs
         if: always()
         run: |
-          for f in bench_before.txt bench_v1.txt bench_v2.txt; do
+          for f in bench_before.txt bench_v1.txt bench_v3.txt; do
             if [ -f "$f" ]; then
               echo "===== $f =====" >> "$GITHUB_STEP_SUMMARY"
-              grep -E "hscale_8_to_15__fs_4|Timing" "$f" >> "$GITHUB_STEP_SUMMARY" || true
+              grep -E "hscale_8_to_15__fs_4|hscale_8_to_19__fs_4|Timing" "$f" >> "$GITHUB_STEP_SUMMARY" || true
             fi
           done
 
