@@ -198,153 +198,122 @@ function ff_hscale8to15_X4_neon, export=1
         ret
 endfunc
 
+// 4-tap hscale with register tbl-transpose.
+//
+// For each group of 8 output pixels the 4 contiguous source bytes of each
+// pixel are gathered into two 128-bit words, and the four byte-planes (one
+// per filter tap, across all 8 pixels) are extracted with a register tbl.
+// This avoids the store-to-stack + ld4 transpose of the reference kernel,
+// keeping the gather path in registers.  Uses only caller-saved registers,
+// so no callee-saved saves or stack allocation are required.
+const .Lhsc_e_idx0, align=4
+        .byte   0,  4,  8, 12, 16, 20, 24, 28,  0,  0,  0,  0,  0,  0,  0,  0
+endconst
+const .Lhsc_e_idx1, align=4
+        .byte   1,  5,  9, 13, 17, 21, 25, 29,  0,  0,  0,  0,  0,  0,  0,  0
+endconst
+const .Lhsc_e_idx2, align=4
+        .byte   2,  6, 10, 14, 18, 22, 26, 30,  0,  0,  0,  0,  0,  0,  0,  0
+endconst
+const .Lhsc_e_idx3, align=4
+        .byte   3,  7, 11, 15, 19, 23, 27, 31,  0,  0,  0,  0,  0,  0,  0,  0
+endconst
+// 4-tap hscale, register tbl-transpose with load-to-lane gather.
+//
+// Each 4-byte source window is loaded straight into a vector lane
+// (no GPR->vector move and no stack round-trip); the eight windows
+// fill two table registers and the four byte planes are extracted
+// with the 32-byte tbl tables.
 function ff_hscale8to15_4_neon, export=1
 // x0  SwsInternal *c (not used)
 // x1  int16_t *dst
-// x2  int dstW
+// w2  int dstW
 // x3  const uint8_t *src
 // x4  const int16_t *filter
 // x5  const int32_t *filterPos
-// x6  int filterSize
-// x8-x15 registers for gathering src data
+// w6  int filterSize (not used; fixed at 4)
+//
+// v0       accumulator for output pixels 0..3
+// v5       accumulator for output pixels 4..7
+// v16-v19  the four byte-planes (tap 0..3) after the tbl transpose
+// v24-v27  the four tbl index vectors
 
-// v0      madd accumulator 4S
-// v1-v4   filter values (16 bit) 8H
-// v5      madd accumulator 4S
-// v16-v19 src values (8 bit) 8B
-
-// This implementation has 4 sections:
-//  1. Prefetch src data
-//  2. Interleaved prefetching src data and madd
-//  3. Complete madd
-//  4. Complete remaining iterations when dstW % 8 != 0
-
-        sub             sp, sp, #32                 // allocate 32 bytes on the stack
-        cmp             w2, #16                     // if dstW <16, skip to the last block used for wrapping up
-        b.lt            2f
-
-        // load 8 values from filterPos to be used as offsets into src
-        ldp             w8, w9,  [x5]               // filterPos[idx + 0], [idx + 1]
-        ldp             w10, w11, [x5, #8]          // filterPos[idx + 2], [idx + 3]
-        ldp             w12, w13, [x5, #16]         // filterPos[idx + 4], [idx + 5]
-        ldp             w14, w15, [x5, #24]         // filterPos[idx + 6], [idx + 7]
-        add             x5, x5, #32                 // advance filterPos
-
-        // gather random access data from src into contiguous memory
-        ldr             w8, [x3, w8, uxtw]          // src[filterPos[idx + 0]][0..3]
-        ldr             w9, [x3, w9, uxtw]          // src[filterPos[idx + 1]][0..3]
-        ldr             w10, [x3, w10, uxtw]        // src[filterPos[idx + 2]][0..3]
-        ldr             w11, [x3, w11, uxtw]        // src[filterPos[idx + 3]][0..3]
-        ldr             w12, [x3, w12, uxtw]        // src[filterPos[idx + 4]][0..3]
-        ldr             w13, [x3, w13, uxtw]        // src[filterPos[idx + 5]][0..3]
-        ldr             w14, [x3, w14, uxtw]        // src[filterPos[idx + 6]][0..3]
-        ldr             w15, [x3, w15, uxtw]        // src[filterPos[idx + 7]][0..3]
-        stp             w8, w9, [sp]                // *scratch_mem = { src[filterPos[idx + 0]][0..3], src[filterPos[idx + 1]][0..3] }
-        stp             w10, w11, [sp, #8]          // *scratch_mem = { src[filterPos[idx + 2]][0..3], src[filterPos[idx + 3]][0..3] }
-        stp             w12, w13, [sp, #16]         // *scratch_mem = { src[filterPos[idx + 4]][0..3], src[filterPos[idx + 5]][0..3] }
-        stp             w14, w15, [sp, #24]         // *scratch_mem = { src[filterPos[idx + 6]][0..3], src[filterPos[idx + 7]][0..3] }
-
-1:
-        ld4             {v16.8b, v17.8b, v18.8b, v19.8b}, [sp] // transpose 8 bytes each from src into 4 registers
-
-        // load 8 values from filterPos to be used as offsets into src
-        ldp             w8, w9,  [x5]               // filterPos[idx + 0][0..3], [idx + 1][0..3], next iteration
-        ldp             w10, w11, [x5, #8]          // filterPos[idx + 2][0..3], [idx + 3][0..3], next iteration
-        ldp             w12, w13, [x5, #16]         // filterPos[idx + 4][0..3], [idx + 5][0..3], next iteration
-        ldp             w14, w15, [x5, #24]         // filterPos[idx + 6][0..3], [idx + 7][0..3], next iteration
-
-        movi            v0.16b, #0                  // Clear madd accumulator for idx 0..3
-        movi            v5.16b, #0                  // Clear madd accumulator for idx 4..7
-
-        ld4             {v1.8h, v2.8h, v3.8h, v4.8h}, [x4], #64 // load filter idx + 0..7
-
-        add             x5, x5, #32                 // advance filterPos
-
-        // interleaved SIMD and prefetching intended to keep ld/st and vector pipelines busy
-        uxtl            v16.8h, v16.8b              // unsigned extend long, convert src data to 16-bit
-        uxtl            v17.8h, v17.8b              // unsigned extend long, convert src data to 16-bit
-        ldr             w8, [x3, w8, uxtw]          // src[filterPos[idx + 0]], next iteration
-        ldr             w9, [x3, w9, uxtw]          // src[filterPos[idx + 1]], next iteration
-        uxtl            v18.8h, v18.8b              // unsigned extend long, convert src data to 16-bit
-        uxtl            v19.8h, v19.8b              // unsigned extend long, convert src data to 16-bit
-        ldr             w10, [x3, w10, uxtw]        // src[filterPos[idx + 2]], next iteration
-        ldr             w11, [x3, w11, uxtw]        // src[filterPos[idx + 3]], next iteration
-
-        smlal           v0.4s, v1.4h, v16.4h        // multiply accumulate inner loop j = 0, idx = 0..3
-        smlal           v0.4s, v2.4h, v17.4h        // multiply accumulate inner loop j = 1, idx = 0..3
-        ldr             w12, [x3, w12, uxtw]        // src[filterPos[idx + 4]], next iteration
-        ldr             w13, [x3, w13, uxtw]        // src[filterPos[idx + 5]], next iteration
-        smlal           v0.4s, v3.4h, v18.4h        // multiply accumulate inner loop j = 2, idx = 0..3
-        smlal           v0.4s, v4.4h, v19.4h        // multiply accumulate inner loop j = 3, idx = 0..3
-        ldr             w14, [x3, w14, uxtw]        // src[filterPos[idx + 6]], next iteration
-        ldr             w15, [x3, w15, uxtw]        // src[filterPos[idx + 7]], next iteration
-
-        smlal2          v5.4s, v1.8h, v16.8h        // multiply accumulate inner loop j = 0, idx = 4..7
-        smlal2          v5.4s, v2.8h, v17.8h        // multiply accumulate inner loop j = 1, idx = 4..7
-        stp             w8, w9, [sp]                // *scratch_mem = { src[filterPos[idx + 0]][0..3], src[filterPos[idx + 1]][0..3] }
-        stp             w10, w11, [sp, #8]          // *scratch_mem = { src[filterPos[idx + 2]][0..3], src[filterPos[idx + 3]][0..3] }
-        smlal2          v5.4s, v3.8h, v18.8h        // multiply accumulate inner loop j = 2, idx = 4..7
-        smlal2          v5.4s, v4.8h, v19.8h        // multiply accumulate inner loop j = 3, idx = 4..7
-        stp             w12, w13, [sp, #16]         // *scratch_mem = { src[filterPos[idx + 4]][0..3], src[filterPos[idx + 5]][0..3] }
-        stp             w14, w15, [sp, #24]         // *scratch_mem = { src[filterPos[idx + 6]][0..3], src[filterPos[idx + 7]][0..3] }
-
-        sub             w2, w2, #8                  // dstW -= 8
-        sqshrn          v0.4h, v0.4s, #7            // shift and clip the 2x16-bit final values
-        sqshrn          v1.4h, v5.4s, #7            // shift and clip the 2x16-bit final values
-        st1             {v0.4h, v1.4h}, [x1], #16   // write to dst[idx + 0..7]
-        cmp             w2, #16                     // continue on main loop if there are at least 16 iterations left
-        b.ge            1b
-
-        // last full iteration
-        ld4             {v16.8b, v17.8b, v18.8b, v19.8b}, [sp]
-        ld4             {v1.8h, v2.8h, v3.8h, v4.8h}, [x4], #64 // load filter idx + 0..7
-
-        movi            v0.16b, #0                  // Clear madd accumulator for idx 0..3
-        movi            v5.16b, #0                  // Clear madd accumulator for idx 4..7
-
-        uxtl            v16.8h, v16.8b              // unsigned extend long, convert src data to 16-bit
-        uxtl            v17.8h, v17.8b              // unsigned extend long, convert src data to 16-bit
-        uxtl            v18.8h, v18.8b              // unsigned extend long, convert src data to 16-bit
-        uxtl            v19.8h, v19.8b              // unsigned extend long, convert src data to 16-bit
-
-        smlal           v0.4s, v1.4h, v16.4h        // multiply accumulate inner loop j = 0, idx = 0..3
-        smlal           v0.4s, v2.4h, v17.4h        // multiply accumulate inner loop j = 1, idx = 0..3
-        smlal           v0.4s, v3.4h, v18.4h        // multiply accumulate inner loop j = 2, idx = 0..3
-        smlal           v0.4s, v4.4h, v19.4h        // multiply accumulate inner loop j = 3, idx = 0..3
-
-        smlal2          v5.4s, v1.8h, v16.8h        // multiply accumulate inner loop j = 0, idx = 4..7
-        smlal2          v5.4s, v2.8h, v17.8h        // multiply accumulate inner loop j = 1, idx = 4..7
-        smlal2          v5.4s, v3.8h, v18.8h        // multiply accumulate inner loop j = 2, idx = 4..7
-        smlal2          v5.4s, v4.8h, v19.8h        // multiply accumulate inner loop j = 3, idx = 4..7
-
-        subs            w2, w2, #8                  // dstW -= 8
-        sqshrn          v0.4h, v0.4s, #7            // shift and clip the 2x16-bit final values
-        sqshrn          v1.4h, v5.4s, #7            // shift and clip the 2x16-bit final values
-        st1             {v0.4h, v1.4h}, [x1], #16   // write to dst[idx + 0..7]
-
-        cbnz            w2, 2f                      // if >0 iterations remain, jump to the wrap up section
-
-        add             sp, sp, #32                 // clean up stack
-        ret
-
-        // finish up when dstW % 8 != 0 or dstW < 16
-2:
-        // load src
-        ldr             w8, [x5], #4                // filterPos[i]
-        add             x9, x3, w8, uxtw            // calculate the address for src load
-        ld1             {v5.s}[0], [x9]             // src[filterPos[i] + 0..3]
-        // load filter
-        ld1             {v6.4h}, [x4], #8           // filter[filterSize * i + 0..3]
-
-        uxtl            v5.8h, v5.8b                // unsigned extend long, convert src data to 16-bit
-        smull           v0.4s, v5.4h, v6.4h         // 4 iterations of src[...] * filter[...]
-        addv            s0, v0.4s                   // add up products of src and filter values
-        sqshrn          h0, s0, #7                  // shift and clip the 2x16-bit final value
-        st1             {v0.h}[0], [x1], #2         // dst[i] = ...
-        sub             w2, w2, #1                  // dstW--
-        cbnz            w2, 2b
-
-        add             sp, sp, #32                 // clean up stack
+// v28-v29  the gathered source windows, loaded straight into lanes
+        cmp             w2, #8
+        b.lt            .Lhscale4_tail
+        movrel          x6, .Lhsc_e_idx0
+        movrel          x7, .Lhsc_e_idx1
+        movrel          x8, .Lhsc_e_idx2
+        movrel          x9, .Lhsc_e_idx3
+        ldr             q24, [x6]
+        ldr             q25, [x7]
+        ldr             q26, [x8]
+        ldr             q27, [x9]
+.Lhscale4_loop:
+        // gather the 8 filter positions, then load each source window
+        // directly into a vector lane
+        ldp             w8,  w9,  [x5]
+        ldp             w10, w11, [x5, #8]
+        ldp             w12, w13, [x5, #16]
+        ldp             w14, w15, [x5, #24]
+        add             x5, x5, #32
+        add             x8,  x3, w8,  uxtw
+        add             x9,  x3, w9,  uxtw
+        add             x10, x3, w10, uxtw
+        add             x11, x3, w11, uxtw
+        add             x12, x3, w12, uxtw
+        add             x13, x3, w13, uxtw
+        add             x14, x3, w14, uxtw
+        add             x15, x3, w15, uxtw
+        ld1             {v28.s}[0], [x8]
+        ld1             {v28.s}[1], [x9]
+        ld1             {v28.s}[2], [x10]
+        ld1             {v28.s}[3], [x11]
+        ld1             {v29.s}[0], [x12]
+        ld1             {v29.s}[1], [x13]
+        ld1             {v29.s}[2], [x14]
+        ld1             {v29.s}[3], [x15]
+        tbl             v16.8b, {v28.16b, v29.16b}, v24.8b
+        tbl             v17.8b, {v28.16b, v29.16b}, v25.8b
+        tbl             v18.8b, {v28.16b, v29.16b}, v26.8b
+        tbl             v19.8b, {v28.16b, v29.16b}, v27.8b
+        ld4             {v1.8h, v2.8h, v3.8h, v4.8h}, [x4], #64
+        uxtl            v16.8h, v16.8b
+        uxtl            v17.8h, v17.8b
+        uxtl            v18.8h, v18.8b
+        uxtl            v19.8h, v19.8b
+        movi            v0.16b, #0
+        movi            v5.16b, #0
+        smlal           v0.4s, v1.4h, v16.4h
+        smlal           v0.4s, v2.4h, v17.4h
+        smlal           v0.4s, v3.4h, v18.4h
+        smlal           v0.4s, v4.4h, v19.4h
+        smlal2          v5.4s, v1.8h, v16.8h
+        smlal2          v5.4s, v2.8h, v17.8h
+        smlal2          v5.4s, v3.8h, v18.8h
+        smlal2          v5.4s, v4.8h, v19.8h
+        sqshrn          v0.4h, v0.4s, #7
+        sqshrn          v1.4h, v5.4s, #7
+        st1             {v0.4h, v1.4h}, [x1], #16
+        sub             w2, w2, #8
+        cmp             w2, #8
+        b.ge            .Lhscale4_loop
+.Lhscale4_tail:
+        cbz             w2, .Lhscale4_end
+.Lhscale4_tail_loop:
+        // scalar tail for the remaining dstW % 8 (1..7) pixels
+        ldr             w8,  [x5], #4
+        add             x9,  x3, w8, uxtw
+        ld1             {v5.s}[0], [x9]
+        ld1             {v6.4h}, [x4], #8
+        uxtl            v5.8h, v5.8b
+        smull           v0.4s, v5.4h, v6.4h
+        addv            s0, v0.4s
+        sqshrn          h0, s0, #7
+        st1             {v0.h}[0], [x1], #2
+        subs            w2, w2, #1
+        b.ne            .Lhscale4_tail_loop
+.Lhscale4_end:
         ret
 endfunc
 
