@@ -26,7 +26,7 @@ jobs:
 
       - name: Build + bench v1 (7b14e0c605)
         run: |
-          git checkout 7b14e0c605
+          git checkout ci/v1-ref
           make -j4 checkasm
           ./tests/checkasm/checkasm --test=sw_scale --bench | tee bench_v1.txt
 
