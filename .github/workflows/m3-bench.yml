@@ -32,7 +32,7 @@ jobs:
 
       - name: Build + bench v2 (fe23ed0219)
         run: |
-          git checkout fe23ed0219
+          git checkout ci/v2-ref
           make -j4 checkasm
           ./tests/checkasm/checkasm --test=sw_scale --bench | tee bench_v2.txt
 
