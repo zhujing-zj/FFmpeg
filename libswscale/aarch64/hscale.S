@@ -253,9 +253,6 @@ function ff_hscale8to15_4_neon, export=1
         ldp             w12, w13, [x5, #16]         // filterPos[idx + 4][0..3], [idx + 5][0..3], next iteration
         ldp             w14, w15, [x5, #24]         // filterPos[idx + 6][0..3], [idx + 7][0..3], next iteration
 
-        movi            v0.16b, #0                  // Clear madd accumulator for idx 0..3
-        movi            v5.16b, #0                  // Clear madd accumulator for idx 4..7
-
         ld4             {v1.8h, v2.8h, v3.8h, v4.8h}, [x4], #64 // load filter idx + 0..7
 
         add             x5, x5, #32                 // advance filterPos
@@ -270,7 +267,7 @@ function ff_hscale8to15_4_neon, export=1
         ldr             w10, [x3, w10, uxtw]        // src[filterPos[idx + 2]], next iteration
         ldr             w11, [x3, w11, uxtw]        // src[filterPos[idx + 3]], next iteration
 
-        smlal           v0.4s, v1.4h, v16.4h        // multiply accumulate inner loop j = 0, idx = 0..3
+        smull           v0.4s, v1.4h, v16.4h        // multiply first tap, idx = 0..3 (replaces movi + smlal)
         smlal           v0.4s, v2.4h, v17.4h        // multiply accumulate inner loop j = 1, idx = 0..3
         ldr             w12, [x3, w12, uxtw]        // src[filterPos[idx + 4]], next iteration
         ldr             w13, [x3, w13, uxtw]        // src[filterPos[idx + 5]], next iteration
@@ -279,7 +276,7 @@ function ff_hscale8to15_4_neon, export=1
         ldr             w14, [x3, w14, uxtw]        // src[filterPos[idx + 6]], next iteration
         ldr             w15, [x3, w15, uxtw]        // src[filterPos[idx + 7]], next iteration
 
-        smlal2          v5.4s, v1.8h, v16.8h        // multiply accumulate inner loop j = 0, idx = 4..7
+        smull2          v5.4s, v1.8h, v16.8h        // multiply first tap, idx = 4..7 (replaces movi + smlal2)
         smlal2          v5.4s, v2.8h, v17.8h        // multiply accumulate inner loop j = 1, idx = 4..7
         stp             w8, w9, [sp]                // *scratch_mem = { src[filterPos[idx + 0]][0..3], src[filterPos[idx + 1]][0..3] }
         stp             w10, w11, [sp, #8]          // *scratch_mem = { src[filterPos[idx + 2]][0..3], src[filterPos[idx + 3]][0..3] }
@@ -299,20 +296,17 @@ function ff_hscale8to15_4_neon, export=1
         ld4             {v16.8b, v17.8b, v18.8b, v19.8b}, [sp]
         ld4             {v1.8h, v2.8h, v3.8h, v4.8h}, [x4], #64 // load filter idx + 0..7
 
-        movi            v0.16b, #0                  // Clear madd accumulator for idx 0..3
-        movi            v5.16b, #0                  // Clear madd accumulator for idx 4..7
-
         uxtl            v16.8h, v16.8b              // unsigned extend long, convert src data to 16-bit
         uxtl            v17.8h, v17.8b              // unsigned extend long, convert src data to 16-bit
         uxtl            v18.8h, v18.8b              // unsigned extend long, convert src data to 16-bit
         uxtl            v19.8h, v19.8b              // unsigned extend long, convert src data to 16-bit
 
-        smlal           v0.4s, v1.4h, v16.4h        // multiply accumulate inner loop j = 0, idx = 0..3
+        smull           v0.4s, v1.4h, v16.4h        // multiply first tap, idx = 0..3 (replaces movi + smlal)
         smlal           v0.4s, v2.4h, v17.4h        // multiply accumulate inner loop j = 1, idx = 0..3
         smlal           v0.4s, v3.4h, v18.4h        // multiply accumulate inner loop j = 2, idx = 0..3
         smlal           v0.4s, v4.4h, v19.4h        // multiply accumulate inner loop j = 3, idx = 0..3
 
-        smlal2          v5.4s, v1.8h, v16.8h        // multiply accumulate inner loop j = 0, idx = 4..7
+        smull2          v5.4s, v1.8h, v16.8h        // multiply first tap, idx = 4..7 (replaces movi + smlal2)
         smlal2          v5.4s, v2.8h, v17.8h        // multiply accumulate inner loop j = 1, idx = 4..7
         smlal2          v5.4s, v3.8h, v18.8h        // multiply accumulate inner loop j = 2, idx = 4..7
         smlal2          v5.4s, v4.8h, v19.8h        // multiply accumulate inner loop j = 3, idx = 4..7
