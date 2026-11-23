@@ -198,13 +198,14 @@ function ff_hscale8to15_X4_neon, export=1
         ret
 endfunc
 
-// 4-tap hscale with register tbl-transpose.
+// 4-tap hscale with single-lane ld4 gather.
 //
 // For each group of 8 output pixels the 4 contiguous source bytes of each
-// pixel are gathered into two 128-bit words, and the four byte-planes (one
-// per filter tap, across all 8 pixels) are extracted with a register tbl.
-// This avoids the store-to-stack + ld4 transpose of the reference kernel,
-// keeping the gather path in registers.  Uses only caller-saved registers,
+// pixel are gathered directly into the four byte-planes (one per filter
+// tap, across all 8 pixels) with single-lane ld4, so no stack round-trip,
+// no register ins and no tbl transpose are needed.  Two plane sets are
+// double-buffered: while one group is widened and accumulated, the next
+// group is gathered into the other set.  Uses only caller-saved registers,
 // so no callee-saved saves or stack allocation are required.
 const .Lhsc_e_idx0, align=4
         .byte   0,  4,  8, 12, 16, 20, 24, 28,  0,  0,  0,  0,  0,  0,  0,  0
@@ -229,75 +230,60 @@ function ff_hscale8to15_4_neon, export=1
 //
 // v0       accumulator for output pixels 0..3
 // v5       accumulator for output pixels 4..7
-// v16-v19  the four byte-planes (tap 0..3) after the tbl transpose
-// v24-v27  the four tbl index vectors
-// v28-v29  the packed 8 gathered source windows of the current group
-// v30-v31  the packed 8 gathered source windows of the next group
+// v16-v19  plane set A: byte-planes (tap 0..3) of one group
+// v20-v23  plane set B: byte-planes (tap 0..3) of the other group
         cmp             w2, #8
         b.lt            .Lhscale4_tail
-        movrel          x6, .Lhsc_e_idx0
-        movrel          x7, .Lhsc_e_idx1
-        movrel          x8, .Lhsc_e_idx2
-        movrel          x9, .Lhsc_e_idx3
-        ldr             q24, [x6]
-        ldr             q25, [x7]
-        ldr             q26, [x8]
-        ldr             q27, [x9]
-        // gather and pack the first group of 8 source windows
+        // gather and deinterleave the first group into plane set A
         ldp             w8,  w9,  [x5]
         ldp             w10, w11, [x5, #8]
         ldp             w12, w13, [x5, #16]
         ldp             w14, w15, [x5, #24]
         add             x5, x5, #32
-        ldr             w8,  [x3, w8,  uxtw]
-        ldr             w9,  [x3, w9,  uxtw]
-        ldr             w10, [x3, w10, uxtw]
-        ldr             w11, [x3, w11, uxtw]
-        ldr             w12, [x3, w12, uxtw]
-        ldr             w13, [x3, w13, uxtw]
-        ldr             w14, [x3, w14, uxtw]
-        ldr             w15, [x3, w15, uxtw]
-        ins             v28.s[0], w8
-        ins             v28.s[1], w9
-        ins             v28.s[2], w10
-        ins             v28.s[3], w11
-        ins             v29.s[0], w12
-        ins             v29.s[1], w13
-        ins             v29.s[2], w14
-        ins             v29.s[3], w15
+        add             x8,  x3, w8,  uxtw
+        add             x9,  x3, w9,  uxtw
+        add             x10, x3, w10, uxtw
+        add             x11, x3, w11, uxtw
+        add             x12, x3, w12, uxtw
+        add             x13, x3, w13, uxtw
+        add             x14, x3, w14, uxtw
+        add             x15, x3, w15, uxtw
+        ld4             {v16.b, v17.b, v18.b, v19.b}[0], [x8]
+        ld4             {v16.b, v17.b, v18.b, v19.b}[1], [x9]
+        ld4             {v16.b, v17.b, v18.b, v19.b}[2], [x10]
+        ld4             {v16.b, v17.b, v18.b, v19.b}[3], [x11]
+        ld4             {v16.b, v17.b, v18.b, v19.b}[4], [x12]
+        ld4             {v16.b, v17.b, v18.b, v19.b}[5], [x13]
+        ld4             {v16.b, v17.b, v18.b, v19.b}[6], [x14]
+        ld4             {v16.b, v17.b, v18.b, v19.b}[7], [x15]
         cmp             w2, #16
-        b.lt            .Lhscale4_single
-.Lhscale4_loop:
-        // software pipelining: prefetch the next group's gather while the
-        // current group is transposed and accumulated, keeping the ld/st and
+        b.lt            .Lhscale4_consumeA
+.Lhscale4_loopA:
+        // software pipelining: gather the next group into plane set B while
+        // plane set A is widened and accumulated, keeping the ld/st and
         // vector pipelines busy
         ldp             w8,  w9,  [x5]             // filterPos[idx + 0..7], next iteration
         ldp             w10, w11, [x5, #8]
         ldp             w12, w13, [x5, #16]
         ldp             w14, w15, [x5, #24]
         add             x5, x5, #32
-        // transpose: byte-plane j holds tap j of all 8 current pixels
-        tbl             v16.8b, {v28.16b, v29.16b}, v24.8b
-        tbl             v17.8b, {v28.16b, v29.16b}, v25.8b
-        tbl             v18.8b, {v28.16b, v29.16b}, v26.8b
-        tbl             v19.8b, {v28.16b, v29.16b}, v27.8b
-        ldr             w8,  [x3, w8,  uxtw]       // src[filterPos[idx + 0]], next iteration
-        ldr             w9,  [x3, w9,  uxtw]
-        ldr             w10, [x3, w10, uxtw]
-        ldr             w11, [x3, w11, uxtw]
-        ldr             w12, [x3, w12, uxtw]
-        ldr             w13, [x3, w13, uxtw]
-        ldr             w14, [x3, w14, uxtw]
-        ldr             w15, [x3, w15, uxtw]
+        add             x8,  x3, w8,  uxtw         // src[filterPos[idx + 0]], next iteration
+        add             x9,  x3, w9,  uxtw
+        add             x10, x3, w10, uxtw
+        add             x11, x3, w11, uxtw
+        add             x12, x3, w12, uxtw
+        add             x13, x3, w13, uxtw
+        add             x14, x3, w14, uxtw
+        add             x15, x3, w15, uxtw
+        ld4             {v20.b, v21.b, v22.b, v23.b}[0], [x8]
+        ld4             {v20.b, v21.b, v22.b, v23.b}[1], [x9]
+        ld4             {v20.b, v21.b, v22.b, v23.b}[2], [x10]
+        ld4             {v20.b, v21.b, v22.b, v23.b}[3], [x11]
+        ld4             {v20.b, v21.b, v22.b, v23.b}[4], [x12]
+        ld4             {v20.b, v21.b, v22.b, v23.b}[5], [x13]
+        ld4             {v20.b, v21.b, v22.b, v23.b}[6], [x14]
+        ld4             {v20.b, v21.b, v22.b, v23.b}[7], [x15]
         ld4             {v1.8h, v2.8h, v3.8h, v4.8h}, [x4], #64 // load filter idx + 0..7
-        ins             v30.s[0], w8               // pack the next gathered words
-        ins             v30.s[1], w9
-        ins             v30.s[2], w10
-        ins             v30.s[3], w11
-        ins             v31.s[0], w12
-        ins             v31.s[1], w13
-        ins             v31.s[2], w14
-        ins             v31.s[3], w15
         movi            v0.16b, #0                 // clear madd accumulators
         movi            v5.16b, #0
         uxtl            v16.8h, v16.8b             // unsigned extend the byte-planes
@@ -316,15 +302,55 @@ function ff_hscale8to15_4_neon, export=1
         sqshrn          v0.4h, v0.4s, #7           // >>7 and saturate-narrow to 16-bit
         sqshrn          v1.4h, v5.4s, #7
         st1             {v0.4h, v1.4h}, [x1], #16  // write 8 output pixels
-        mov             v28.16b, v30.16b           // shift in the next packed words
-        mov             v29.16b, v31.16b
         cmp             w2, #16                    // at least two groups left?
-        b.ge            .Lhscale4_loop
-        // last vector iteration: consume the prefetched group
-        tbl             v16.8b, {v28.16b, v29.16b}, v24.8b
-        tbl             v17.8b, {v28.16b, v29.16b}, v25.8b
-        tbl             v18.8b, {v28.16b, v29.16b}, v26.8b
-        tbl             v19.8b, {v28.16b, v29.16b}, v27.8b
+        b.lt            .Lhscale4_consumeB
+.Lhscale4_loopB:
+        // gather the next group into plane set A while plane set B is
+        // widened and accumulated
+        ldp             w8,  w9,  [x5]
+        ldp             w10, w11, [x5, #8]
+        ldp             w12, w13, [x5, #16]
+        ldp             w14, w15, [x5, #24]
+        add             x5, x5, #32
+        add             x8,  x3, w8,  uxtw
+        add             x9,  x3, w9,  uxtw
+        add             x10, x3, w10, uxtw
+        add             x11, x3, w11, uxtw
+        add             x12, x3, w12, uxtw
+        add             x13, x3, w13, uxtw
+        add             x14, x3, w14, uxtw
+        add             x15, x3, w15, uxtw
+        ld4             {v16.b, v17.b, v18.b, v19.b}[0], [x8]
+        ld4             {v16.b, v17.b, v18.b, v19.b}[1], [x9]
+        ld4             {v16.b, v17.b, v18.b, v19.b}[2], [x10]
+        ld4             {v16.b, v17.b, v18.b, v19.b}[3], [x11]
+        ld4             {v16.b, v17.b, v18.b, v19.b}[4], [x12]
+        ld4             {v16.b, v17.b, v18.b, v19.b}[5], [x13]
+        ld4             {v16.b, v17.b, v18.b, v19.b}[6], [x14]
+        ld4             {v16.b, v17.b, v18.b, v19.b}[7], [x15]
+        ld4             {v1.8h, v2.8h, v3.8h, v4.8h}, [x4], #64
+        movi            v0.16b, #0
+        movi            v5.16b, #0
+        uxtl            v20.8h, v20.8b
+        uxtl            v21.8h, v21.8b
+        uxtl            v22.8h, v22.8b
+        uxtl            v23.8h, v23.8b
+        smlal           v0.4s, v1.4h, v20.4h
+        smlal           v0.4s, v2.4h, v21.4h
+        smlal           v0.4s, v3.4h, v22.4h
+        smlal           v0.4s, v4.4h, v23.4h
+        smlal2          v5.4s, v1.8h, v20.8h
+        smlal2          v5.4s, v2.8h, v21.8h
+        smlal2          v5.4s, v3.8h, v22.8h
+        smlal2          v5.4s, v4.8h, v23.8h
+        sub             w2, w2, #8
+        sqshrn          v0.4h, v0.4s, #7
+        sqshrn          v1.4h, v5.4s, #7
+        st1             {v0.4h, v1.4h}, [x1], #16
+        cmp             w2, #16
+        b.ge            .Lhscale4_loopA
+.Lhscale4_consumeA:
+        // a single group (dstW < 16) or the last group, held in plane set A
         ld4             {v1.8h, v2.8h, v3.8h, v4.8h}, [x4], #64
         movi            v0.16b, #0
         movi            v5.16b, #0
@@ -346,31 +372,27 @@ function ff_hscale8to15_4_neon, export=1
         st1             {v0.4h, v1.4h}, [x1], #16
         cbnz            w2, .Lhscale4_tail
         ret
-.Lhscale4_single:
-        // dstW in [8,15]: a single unpipelined vector group
-        tbl             v16.8b, {v28.16b, v29.16b}, v24.8b
-        tbl             v17.8b, {v28.16b, v29.16b}, v25.8b
-        tbl             v18.8b, {v28.16b, v29.16b}, v26.8b
-        tbl             v19.8b, {v28.16b, v29.16b}, v27.8b
+.Lhscale4_consumeB:
+        // the last group, gathered into plane set B
         ld4             {v1.8h, v2.8h, v3.8h, v4.8h}, [x4], #64
         movi            v0.16b, #0
         movi            v5.16b, #0
-        uxtl            v16.8h, v16.8b
-        uxtl            v17.8h, v17.8b
-        uxtl            v18.8h, v18.8b
-        uxtl            v19.8h, v19.8b
-        smlal           v0.4s, v1.4h, v16.4h
-        smlal           v0.4s, v2.4h, v17.4h
-        smlal           v0.4s, v3.4h, v18.4h
-        smlal           v0.4s, v4.4h, v19.4h
-        smlal2          v5.4s, v1.8h, v16.8h
-        smlal2          v5.4s, v2.8h, v17.8h
-        smlal2          v5.4s, v3.8h, v18.8h
-        smlal2          v5.4s, v4.8h, v19.8h
+        uxtl            v20.8h, v20.8b
+        uxtl            v21.8h, v21.8b
+        uxtl            v22.8h, v22.8b
+        uxtl            v23.8h, v23.8b
+        smlal           v0.4s, v1.4h, v20.4h
+        smlal           v0.4s, v2.4h, v21.4h
+        smlal           v0.4s, v3.4h, v22.4h
+        smlal           v0.4s, v4.4h, v23.4h
+        smlal2          v5.4s, v1.8h, v20.8h
+        smlal2          v5.4s, v2.8h, v21.8h
+        smlal2          v5.4s, v3.8h, v22.8h
+        smlal2          v5.4s, v4.8h, v23.8h
+        sub             w2, w2, #8
         sqshrn          v0.4h, v0.4s, #7
         sqshrn          v1.4h, v5.4s, #7
         st1             {v0.4h, v1.4h}, [x1], #16
-        sub             w2, w2, #8
         cbnz            w2, .Lhscale4_tail
         ret
 .Lhscale4_tail:
