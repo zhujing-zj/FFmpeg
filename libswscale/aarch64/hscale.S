@@ -219,7 +219,7 @@ function ff_hscale8to15_4_neon, export=1
 //  3. Complete madd
 //  4. Complete remaining iterations when dstW % 8 != 0
 
-        sub             sp, sp, #32                 // allocate 32 bytes on the stack
+        sub             sp, sp, #64                 // allocate two 32-byte double-buffered scratch slots
         cmp             w2, #16                     // if dstW <16, skip to the last block used for wrapping up
         b.lt            2f
 
@@ -244,14 +244,14 @@ function ff_hscale8to15_4_neon, export=1
         stp             w12, w13, [sp, #16]         // *scratch_mem = { src[filterPos[idx + 4]][0..3], src[filterPos[idx + 5]][0..3] }
         stp             w14, w15, [sp, #24]         // *scratch_mem = { src[filterPos[idx + 6]][0..3], src[filterPos[idx + 7]][0..3] }
 
-1:
-        ld4             {v16.8b, v17.8b, v18.8b, v19.8b}, [sp] // transpose 8 bytes each from src into 4 registers
+.Lc3_loopA:
+        ld4             {v16.8b, v17.8b, v18.8b, v19.8b}, [sp] // transpose the current group from slot A
 
         // load 8 values from filterPos to be used as offsets into src
-        ldp             w8, w9,  [x5]               // filterPos[idx + 0][0..3], [idx + 1][0..3], next iteration
-        ldp             w10, w11, [x5, #8]          // filterPos[idx + 2][0..3], [idx + 3][0..3], next iteration
-        ldp             w12, w13, [x5, #16]         // filterPos[idx + 4][0..3], [idx + 5][0..3], next iteration
-        ldp             w14, w15, [x5, #24]         // filterPos[idx + 6][0..3], [idx + 7][0..3], next iteration
+        ldp             w8, w9,  [x5]               // filterPos[idx + 0..7], next iteration
+        ldp             w10, w11, [x5, #8]
+        ldp             w12, w13, [x5, #16]
+        ldp             w14, w15, [x5, #24]
 
         movi            v0.16b, #0                  // Clear madd accumulator for idx 0..3
         movi            v5.16b, #0                  // Clear madd accumulator for idx 4..7
@@ -281,21 +281,71 @@ function ff_hscale8to15_4_neon, export=1
 
         smlal2          v5.4s, v1.8h, v16.8h        // multiply accumulate inner loop j = 0, idx = 4..7
         smlal2          v5.4s, v2.8h, v17.8h        // multiply accumulate inner loop j = 1, idx = 4..7
-        stp             w8, w9, [sp]                // *scratch_mem = { src[filterPos[idx + 0]][0..3], src[filterPos[idx + 1]][0..3] }
-        stp             w10, w11, [sp, #8]          // *scratch_mem = { src[filterPos[idx + 2]][0..3], src[filterPos[idx + 3]][0..3] }
+        stp             w8, w9, [sp, #32]           // store the next group into slot B
+        stp             w10, w11, [sp, #40]
         smlal2          v5.4s, v3.8h, v18.8h        // multiply accumulate inner loop j = 2, idx = 4..7
         smlal2          v5.4s, v4.8h, v19.8h        // multiply accumulate inner loop j = 3, idx = 4..7
-        stp             w12, w13, [sp, #16]         // *scratch_mem = { src[filterPos[idx + 4]][0..3], src[filterPos[idx + 5]][0..3] }
-        stp             w14, w15, [sp, #24]         // *scratch_mem = { src[filterPos[idx + 6]][0..3], src[filterPos[idx + 7]][0..3] }
+        stp             w12, w13, [sp, #48]
+        stp             w14, w15, [sp, #56]
 
         sub             w2, w2, #8                  // dstW -= 8
         sqshrn          v0.4h, v0.4s, #7            // shift and clip the 2x16-bit final values
         sqshrn          v1.4h, v5.4s, #7            // shift and clip the 2x16-bit final values
         st1             {v0.4h, v1.4h}, [x1], #16   // write to dst[idx + 0..7]
-        cmp             w2, #16                     // continue on main loop if there are at least 16 iterations left
-        b.ge            1b
+        cmp             w2, #16                     // continue on the alternate loop if at least 16 remain
+        b.lt            .Lc3_lastB
+.Lc3_loopB:
+        add             x7, sp, #32                 // address of slot B (ld4 has no offset form)
+        ld4             {v16.8b, v17.8b, v18.8b, v19.8b}, [x7] // transpose the current group from slot B
 
-        // last full iteration
+        ldp             w8, w9,  [x5]               // filterPos[idx + 0..7], next iteration
+        ldp             w10, w11, [x5, #8]
+        ldp             w12, w13, [x5, #16]
+        ldp             w14, w15, [x5, #24]
+
+        movi            v0.16b, #0
+        movi            v5.16b, #0
+
+        ld4             {v1.8h, v2.8h, v3.8h, v4.8h}, [x4], #64
+
+        add             x5, x5, #32
+
+        uxtl            v16.8h, v16.8b
+        uxtl            v17.8h, v17.8b
+        ldr             w8, [x3, w8, uxtw]          // next iteration
+        ldr             w9, [x3, w9, uxtw]
+        uxtl            v18.8h, v18.8b
+        uxtl            v19.8h, v19.8b
+        ldr             w10, [x3, w10, uxtw]
+        ldr             w11, [x3, w11, uxtw]
+
+        smlal           v0.4s, v1.4h, v16.4h
+        smlal           v0.4s, v2.4h, v17.4h
+        ldr             w12, [x3, w12, uxtw]
+        ldr             w13, [x3, w13, uxtw]
+        smlal           v0.4s, v3.4h, v18.4h
+        smlal           v0.4s, v4.4h, v19.4h
+        ldr             w14, [x3, w14, uxtw]
+        ldr             w15, [x3, w15, uxtw]
+
+        smlal2          v5.4s, v1.8h, v16.8h
+        smlal2          v5.4s, v2.8h, v17.8h
+        stp             w8, w9, [sp]                // store the next group into slot A
+        stp             w10, w11, [sp, #8]
+        smlal2          v5.4s, v3.8h, v18.8h
+        smlal2          v5.4s, v4.8h, v19.8h
+        stp             w12, w13, [sp, #16]
+        stp             w14, w15, [sp, #24]
+
+        sub             w2, w2, #8
+        sqshrn          v0.4h, v0.4s, #7
+        sqshrn          v1.4h, v5.4s, #7
+        st1             {v0.4h, v1.4h}, [x1], #16
+        cmp             w2, #16
+        b.ge            .Lc3_loopA
+
+        // last full iteration: the final group sits in slot A
+.Lc3_lastA:
         ld4             {v16.8b, v17.8b, v18.8b, v19.8b}, [sp]
         ld4             {v1.8h, v2.8h, v3.8h, v4.8h}, [x4], #64 // load filter idx + 0..7
 
@@ -324,7 +374,41 @@ function ff_hscale8to15_4_neon, export=1
 
         cbnz            w2, 2f                      // if >0 iterations remain, jump to the wrap up section
 
-        add             sp, sp, #32                 // clean up stack
+        add             sp, sp, #64                 // clean up stack
+        ret
+
+        // last full iteration: the final group sits in slot B
+.Lc3_lastB:
+        add             x7, sp, #32                 // address of slot B (ld4 has no offset form)
+        ld4             {v16.8b, v17.8b, v18.8b, v19.8b}, [x7]
+        ld4             {v1.8h, v2.8h, v3.8h, v4.8h}, [x4], #64 // load filter idx + 0..7
+
+        movi            v0.16b, #0
+        movi            v5.16b, #0
+
+        uxtl            v16.8h, v16.8b
+        uxtl            v17.8h, v17.8b
+        uxtl            v18.8h, v18.8b
+        uxtl            v19.8h, v19.8b
+
+        smlal           v0.4s, v1.4h, v16.4h
+        smlal           v0.4s, v2.4h, v17.4h
+        smlal           v0.4s, v3.4h, v18.4h
+        smlal           v0.4s, v4.4h, v19.4h
+
+        smlal2          v5.4s, v1.8h, v16.8h
+        smlal2          v5.4s, v2.8h, v17.8h
+        smlal2          v5.4s, v3.8h, v18.8h
+        smlal2          v5.4s, v4.8h, v19.8h
+
+        subs            w2, w2, #8
+        sqshrn          v0.4h, v0.4s, #7
+        sqshrn          v1.4h, v5.4s, #7
+        st1             {v0.4h, v1.4h}, [x1], #16
+
+        cbnz            w2, 2f
+
+        add             sp, sp, #64                 // clean up stack
         ret
 
         // finish up when dstW % 8 != 0 or dstW < 16
@@ -344,7 +428,7 @@ function ff_hscale8to15_4_neon, export=1
         sub             w2, w2, #1                  // dstW--
         cbnz            w2, 2b
 
-        add             sp, sp, #32                 // clean up stack
+        add             sp, sp, #64                 // clean up stack
         ret
 endfunc
 
