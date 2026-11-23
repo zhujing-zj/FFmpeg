@@ -220,8 +220,8 @@ function ff_hscale8to15_4_neon, export=1
 //  4. Complete remaining iterations when dstW % 8 != 0
 
         sub             sp, sp, #32                 // allocate 32 bytes on the stack
-        cmp             w2, #16                     // if dstW <16, skip to the last block used for wrapping up
-        b.lt            2f
+        cmp             w2, #16                     // if dstW <16, skip to the small-width path
+        b.lt            .Lc2_small
 
         // load 8 values from filterPos to be used as offsets into src
         ldp             w8, w9,  [x5]               // filterPos[idx + 0], [idx + 1]
@@ -324,6 +324,53 @@ function ff_hscale8to15_4_neon, export=1
 
         cbnz            w2, 2f                      // if >0 iterations remain, jump to the wrap up section
 
+        add             sp, sp, #32                 // clean up stack
+        ret
+
+        // dstW 8..15: run one full vector group (the stock kernel handles
+        // these widths with the scalar loop only), then finish in the
+        // scalar tail
+.Lc2_small:
+        cmp             w2, #8
+        b.lt            2f
+        ldp             w8, w9,  [x5]               // filterPos[idx + 0..7]
+        ldp             w10, w11, [x5, #8]
+        ldp             w12, w13, [x5, #16]
+        ldp             w14, w15, [x5, #24]
+        add             x5, x5, #32
+        ldr             w8, [x3, w8, uxtw]          // src[filterPos[idx + 0]][0..3]
+        ldr             w9, [x3, w9, uxtw]
+        ldr             w10, [x3, w10, uxtw]
+        ldr             w11, [x3, w11, uxtw]
+        ldr             w12, [x3, w12, uxtw]
+        ldr             w13, [x3, w13, uxtw]
+        ldr             w14, [x3, w14, uxtw]
+        ldr             w15, [x3, w15, uxtw]
+        stp             w8, w9, [sp]
+        stp             w10, w11, [sp, #8]
+        stp             w12, w13, [sp, #16]
+        stp             w14, w15, [sp, #24]
+        ld4             {v16.8b, v17.8b, v18.8b, v19.8b}, [sp] // transpose 8 bytes each from src into 4 registers
+        ld4             {v1.8h, v2.8h, v3.8h, v4.8h}, [x4], #64 // load filter idx + 0..7
+        movi            v0.16b, #0                  // Clear madd accumulator for idx 0..3
+        movi            v5.16b, #0                  // Clear madd accumulator for idx 4..7
+        uxtl            v16.8h, v16.8b              // unsigned extend long, convert src data to 16-bit
+        uxtl            v17.8h, v17.8b
+        uxtl            v18.8h, v18.8b
+        uxtl            v19.8h, v19.8b
+        smlal           v0.4s, v1.4h, v16.4h        // multiply accumulate inner loop j = 0..3, idx = 0..3
+        smlal           v0.4s, v2.4h, v17.4h
+        smlal           v0.4s, v3.4h, v18.4h
+        smlal           v0.4s, v4.4h, v19.4h
+        smlal2          v5.4s, v1.8h, v16.8h        // multiply accumulate inner loop j = 0..3, idx = 4..7
+        smlal2          v5.4s, v2.8h, v17.8h
+        smlal2          v5.4s, v3.8h, v18.8h
+        smlal2          v5.4s, v4.8h, v19.8h
+        sub             w2, w2, #8                  // dstW -= 8
+        sqshrn          v0.4h, v0.4s, #7            // shift and clip the 2x16-bit final values
+        sqshrn          v1.4h, v5.4s, #7
+        st1             {v0.4h, v1.4h}, [x1], #16   // write to dst[idx + 0..7]
+        cbnz            w2, 2f                      // remaining 1..7 pixels go to the scalar tail
         add             sp, sp, #32                 // clean up stack
         ret
 
