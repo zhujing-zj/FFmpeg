@@ -36,10 +36,22 @@ jobs:
           make -j4 checkasm
           ./tests/checkasm/checkasm --test=sw_scale --bench | tee bench_v3.txt
 
+      - name: Build + bench v4a ld4-lane (1968046309)
+        run: |
+          git checkout v4a-ld4lane
+          make -j4 checkasm
+          ./tests/checkasm/checkasm --test=sw_scale --bench | tee bench_v4a.txt
+
+      - name: Build + bench v4b ld1uzp (62f9d0e0ba)
+        run: |
+          git checkout v4b-ld1uzp
+          make -j4 checkasm
+          ./tests/checkasm/checkasm --test=sw_scale --bench | tee bench_v4b.txt
+
       - name: Collect outputs
         if: always()
         run: |
-          for f in bench_before.txt bench_v1.txt bench_v3.txt; do
+          for f in bench_before.txt bench_v1.txt bench_v3.txt bench_v4a.txt bench_v4b.txt; do
             if [ -f "$f" ]; then
               echo "===== $f =====" >> "$GITHUB_STEP_SUMMARY"
               grep -E "hscale_8_to_15__fs_4|hscale_8_to_19__fs_4|Timing" "$f" >> "$GITHUB_STEP_SUMMARY" || true
