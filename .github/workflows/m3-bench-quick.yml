@@ -1,0 +1,48 @@
+name: m3-bench-quick
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bench:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build deps
+        run: brew install nasm || true
+
+      - name: Configure
+        run: |
+          sysctl -n machdep.cpu.brand_string || true
+          ./configure --disable-doc --disable-ffmpeg --disable-ffplay --disable-ffprobe --disable-network --disable-autodetect
+
+      - name: Build + bench baseline (39ccb3ca12)
+        run: |
+          git checkout 39ccb3ca12
+          make -j4 checkasm
+          ./tests/checkasm/checkasm --test=sw_scale --bench | tee bench_before.txt
+
+      - name: Build + bench c3 dbuf (e2675431f1)
+        run: |
+          git checkout c3-dbuf
+          make -j4 checkasm
+          ./tests/checkasm/checkasm --test=sw_scale --bench | tee bench_c3.txt
+
+      - name: Collect outputs
+        if: always()
+        run: |
+          for f in bench_before.txt bench_c3.txt; do
+            if [ -f "$f" ]; then
+              echo "===== $f =====" >> "$GITHUB_STEP_SUMMARY"
+              grep -E "hscale_8_to_15__fs_4|hscale_8_to_19__fs_4|Timing" "$f" >> "$GITHUB_STEP_SUMMARY" || true
+            fi
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-outputs
+          path: bench_*.txt
