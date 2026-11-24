@@ -1,4 +1,4 @@
-name: m3-bench
+name: m3-bench-quick
 
 on:
   workflow_dispatch:
@@ -25,37 +25,7 @@ jobs:
           make -j4 checkasm
           ./tests/checkasm/checkasm --test=sw_scale --bench | tee bench_before.txt
 
-      - name: Build + bench v1 (7b14e0c605)
-        run: |
-          git checkout ci/v1-ref
-          make -j4 checkasm
-          ./tests/checkasm/checkasm --test=sw_scale --bench | tee bench_v1.txt
-
-      - name: Build + bench v2 (fe23ed0219)
-        run: |
-          git checkout ci/v3-ref
-          make -j4 checkasm
-          ./tests/checkasm/checkasm --test=sw_scale --bench | tee bench_v3.txt
-
-      - name: Build + bench v4b ld1uzp (62f9d0e0ba)
-        run: |
-          git checkout v4b-ld1uzp
-          make -j4 checkasm
-          ./tests/checkasm/checkasm --test=sw_scale --bench | tee bench_v4b.txt
-
-      - name: Build + bench c1 smull (863ab06e5f)
-        run: |
-          git checkout c1-smull
-          make -j4 checkasm
-          ./tests/checkasm/checkasm --test=sw_scale --bench | tee bench_c1.txt
-
-      - name: Build + bench c2 smallwidth (1f5b2ca60e)
-        run: |
-          git checkout c2-smallwidth
-          make -j4 checkasm
-          ./tests/checkasm/checkasm --test=sw_scale --bench | tee bench_c2.txt
-
-      - name: Build + bench c3 dbuf (736f5fdca1)
+      - name: Build + bench c3 dbuf (e2675431f1)
         run: |
           git checkout c3-dbuf
           make -j4 checkasm
@@ -64,7 +34,7 @@ jobs:
       - name: Collect outputs
         if: always()
         run: |
-          for f in bench_before.txt bench_v4b.txt bench_c1.txt bench_c2.txt bench_c3.txt; do
+          for f in bench_before.txt bench_c3.txt; do
             if [ -f "$f" ]; then
               echo "===== $f =====" >> "$GITHUB_STEP_SUMMARY"
               grep -E "hscale_8_to_15__fs_4|hscale_8_to_19__fs_4|Timing" "$f" >> "$GITHUB_STEP_SUMMARY" || true
